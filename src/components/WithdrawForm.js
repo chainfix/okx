@@ -13,7 +13,7 @@ import {
   Box
 } from '@mui/material';
 import { validateAddress, validateAmount } from '../utils/validation';
-import { withdraw } from '../services/api';
+import { withdraw, getCurrencyInfo, getWithdrawalFee } from '../services/api';
 
 // 链网络选项
 const NETWORK_OPTIONS = {
@@ -41,7 +41,7 @@ const NETWORK_OPTIONS = {
 const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
   const [formData, setFormData] = useState({
     coin: '',
-    network: '',  // 添加网络选择
+    network: '',
     minAmount: '0',
     maxAmount: '0',
     decimals: '2',
@@ -53,12 +53,34 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
   const [loading, setLoading] = useState(false);
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [shouldStop, setShouldStop] = useState(false);
+  const [networks, setNetworks] = useState([]);
   const withdrawPromiseRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  // 获取币种支持的网络和手续费信息
+  useEffect(() => {
+    const fetchCurrencyInfo = async () => {
+      if (!apiInfo || !formData.coin) return;
+      
+      try {
+        setLoading(true);
+        const currencyInfo = await getCurrencyInfo(apiInfo);
+        const coinNetworks = currencyInfo.filter(info => info.ccy === formData.coin);
+        setNetworks(coinNetworks);
+      } catch (error) {
+        console.error('获取币种信息失败:', error);
+        alert(error.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchCurrencyInfo();
+  }, [apiInfo, formData.coin]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     if (name === 'coin') {
-      // 当币种改变时，重置网络选择
       setFormData(prev => ({
         ...prev,
         [name]: value,
@@ -136,6 +158,9 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
     setShouldStop(false);
     onWithdrawStatusUpdate([]);
     
+    // 创建新的 AbortController
+    abortControllerRef.current = new AbortController();
+    
     try {
       const addressList = formData.addresses.split('\n')
         .filter(line => line.trim())
@@ -157,7 +182,8 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
       // 创建一个可以被中断的提现流程
       withdrawPromiseRef.current = (async () => {
         for (const { address, amount, original } of addressList) {
-          if (shouldStop) {
+          // 检查是否已经停止
+          if (abortControllerRef.current?.signal.aborted) {
             console.log('提现已停止');
             break;
           }
@@ -171,10 +197,28 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
               (parseInt(formData.maxDelay) - parseInt(formData.minDelay) + 1) + 
               parseInt(formData.minDelay)
             ) * 1000;
-            await new Promise(resolve => setTimeout(resolve, delay));
+
+            // 使用可中断的延迟
+            try {
+              await new Promise((resolve, reject) => {
+                const timeoutId = setTimeout(resolve, delay);
+                abortControllerRef.current.signal.addEventListener('abort', () => {
+                  clearTimeout(timeoutId);
+                  reject(new Error('提现已停止'));
+                });
+              });
+            } catch (error) {
+              if (error.message === '提现已停止') {
+                throw error;
+              }
+            }
+
+            // 如果已经停止，不再继续发送请求
+            if (abortControllerRef.current?.signal.aborted) {
+              throw new Error('提现已停止');
+            }
 
             try {
-              // 使用选择的网络构造完整的币种标识
               let chain;
               if (formData.coin === 'POL') {
                 chain = 'POL-Polygon';
@@ -192,6 +236,11 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
                 }
               ]);
             } catch (error) {
+              // 如果是主动停止导致的错误，直接中断循环
+              if (abortControllerRef.current?.signal.aborted) {
+                throw new Error('提现已停止');
+              }
+              
               onWithdrawStatusUpdate(prev => [
                 ...prev,
                 {
@@ -206,6 +255,11 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
               }
             }
           } catch (error) {
+            // 如果是主动停止，直接中断
+            if (error.message === '提现已停止') {
+              throw error;
+            }
+            
             onWithdrawStatusUpdate(prev => [
               ...prev,
               {
@@ -220,18 +274,25 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
         }
       })();
 
-      // 等待提现流程完成
       await withdrawPromiseRef.current;
     } catch (error) {
-      alert(error.message);
+      // 如果不是主动停止导致的错误，才显示错误信息
+      if (error.message !== '提现已停止') {
+        alert(error.message);
+      }
     } finally {
       setLoading(false);
       setIsWithdrawing(false);
       withdrawPromiseRef.current = null;
+      abortControllerRef.current = null;
     }
   };
 
   const handleStopWithdraw = () => {
+    // 立即中止所有操作
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     setShouldStop(true);
     setIsWithdrawing(false);
     setLoading(false);
@@ -240,67 +301,55 @@ const WithdrawForm = ({ apiInfo, balances, onWithdrawStatusUpdate }) => {
   // 组件卸载时清理
   useEffect(() => {
     return () => {
-      if (withdrawPromiseRef.current) {
-        setShouldStop(true);
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
       }
     };
   }, []);
 
   return (
     <Card sx={{ mb: 3 }}>
-      <CardHeader title="批量提现地址" />
+      <CardHeader title="批量提现" />
       <CardContent>
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={6}>
             <FormControl fullWidth>
               <InputLabel>选择币种</InputLabel>
               <Select
                 name="coin"
                 value={formData.coin}
                 onChange={handleInputChange}
-                label="选择币种"
+                disabled={loading || isWithdrawing}
               >
-                {balances.length === 0 ? (
-                  <MenuItem disabled value="">请先读取余额</MenuItem>
-                ) : (
-                  balances.map(balance => (
-                    <MenuItem 
-                      key={balance.ccy} 
-                      value={balance.ccy}
-                    >
-                      {balance.ccy} (可用: {balance.availBal})
-                    </MenuItem>
-                  ))
-                )}
+                {balances.map(balance => (
+                  <MenuItem key={balance.ccy} value={balance.ccy}>
+                    {balance.ccy} (可用: {balance.availBal})
+                  </MenuItem>
+                ))}
               </Select>
             </FormControl>
           </Grid>
 
-          {/* 网络选择 - 始终显示 */}
-          {formData.coin && (
-            <Grid item xs={12}>
-              <FormControl fullWidth>
-                <InputLabel>选择网络</InputLabel>
-                <Select
-                  name="network"
-                  value={formData.network}
-                  onChange={handleInputChange}
-                  label="选择网络"
-                >
-                  {(NETWORK_OPTIONS[formData.coin] || [
-                    { value: formData.coin, label: `${formData.coin} 原生网络` }
-                  ]).map(option => (
-                    <MenuItem 
-                      key={option.value} 
-                      value={option.value}
-                    >
-                      {option.label}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Grid>
-          )}
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth>
+              <InputLabel>选择网络</InputLabel>
+              <Select
+                name="network"
+                value={formData.network}
+                onChange={handleInputChange}
+                disabled={!formData.coin || loading || isWithdrawing}
+              >
+                {networks.map(network => (
+                  <MenuItem 
+                    key={network.chain} 
+                    value={network.chain.split('-')[1]}
+                  >
+                    {network.chain.split('-')[1]} (手续费: {network.minFee} {network.ccy})
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
 
           <Grid item xs={12} md={6}>
             <Box sx={{ display: 'flex', gap: 1 }}>
