@@ -123,21 +123,28 @@ const getChainName = (coin) => {
   return coin;
 };
 
-// 获取币种信息
-export const getCurrencyInfo = async (apiInfo, ccy) => {
+// 获取币种信息和提现手续费
+export const getCurrencyInfo = async (apiInfo) => {
   try {
+    const timestamp = Date.now();
     const path = '/api/v5/asset/currencies';
+    const method = 'GET';
+    
+    const sign = createHeaders(method, path, '', apiInfo);
+
     const response = await axios({
-      method: 'GET',
-      url: `${BASE_URL}${path}?ccy=${ccy}`,
-      headers: createHeaders('GET', path, '', apiInfo)
+      method,
+      url: `${BASE_URL}${path}`,
+      headers: sign,
     });
 
-    console.log('币种信息:', response.data);
-    return response.data.data;
+    if (response.data.code === '0') {
+      return response.data.data;
+    } else {
+      throw new Error(response.data.msg || '获取币种信息失败');
+    }
   } catch (error) {
-    console.error('获取币种信息错误:', error.response?.data);
-    throw new Error(error.response?.data?.msg || error.message);
+    throw new Error(`获取币种信息失败: ${error.message}`);
   }
 };
 
@@ -261,4 +268,30 @@ const getChainNetwork = (coin) => {
   // 如果币种包含连字符，取最后一部分作为网络名
   const parts = coin.split('-');
   return parts[parts.length - 1] || coin;
+};
+
+// 获取提现手续费
+export const getWithdrawalFee = async (apiInfo, ccy) => {
+  try {
+    const timestamp = Date.now();
+    const path = '/api/v5/asset/currencies';
+    const method = 'GET';
+    const params = `?ccy=${ccy}`;
+    
+    const sign = createHeaders(method, path, '', apiInfo);
+
+    const response = await axios({
+      method,
+      url: `${BASE_URL}${path}${params}`,
+      headers: sign,
+    });
+
+    if (response.data.code === '0') {
+      return response.data.data;
+    } else {
+      throw new Error(response.data.msg || '获取提现手续费失败');
+    }
+  } catch (error) {
+    throw new Error(`获取提现手续费失败: ${error.message}`);
+  }
 }; 
